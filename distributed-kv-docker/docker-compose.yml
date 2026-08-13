@@ -1,0 +1,122 @@
+# Runs a real 5-node distributed-kv cluster, one container per node.
+#
+# Inside the Docker network, nodes reach each other by SERVICE NAME
+# (e.g. "node1:9001") instead of "localhost:9001" -- Docker Compose gives
+# every service a DNS name automatically, which is what makes each
+# container reachable from the others.
+#
+# node1 bootstraps a brand-new cluster. node2-5 join through node1's HTTP
+# API on startup.
+#
+# Usage:
+#   docker compose up --build      # start all 5 nodes
+#   docker compose down            # stop and remove containers
+#   docker compose down -v         # stop + wipe persisted data volumes too
+#
+# From your HOST machine (not inside Docker), each node's HTTP API is
+# reachable at localhost:8081 through localhost:8085.
+
+services:
+  node1:
+    build: .
+    container_name: kv-node1
+    command:
+      - "-id=node1"
+      - "-http-addr=:8081"
+      - "-raft-addr=node1:9001"
+      - "-data-dir=/data"
+      - "-bootstrap"
+      - "-peers=node1:9001=node1:8081,node2:9002=node2:8082,node3:9003=node3:8083,node4:9004=node4:8084,node5:9005=node5:8085"
+    ports:
+      - "8081:8081"
+    volumes:
+      - node1-data:/data
+    networks:
+      - kv-net
+
+  node2:
+    build: .
+    container_name: kv-node2
+    command:
+      - "-id=node2"
+      - "-http-addr=:8082"
+      - "-raft-addr=node2:9002"
+      - "-data-dir=/data"
+      - "-join=node1:8081"
+      - "-peers=node1:9001=node1:8081,node2:9002=node2:8082,node3:9003=node3:8083,node4:9004=node4:8084,node5:9005=node5:8085"
+    ports:
+      - "8082:8082"
+    volumes:
+      - node2-data:/data
+    networks:
+      - kv-net
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    container_name: kv-node3
+    command:
+      - "-id=node3"
+      - "-http-addr=:8083"
+      - "-raft-addr=node3:9003"
+      - "-data-dir=/data"
+      - "-join=node1:8081"
+      - "-peers=node1:9001=node1:8081,node2:9002=node2:8082,node3:9003=node3:8083,node4:9004=node4:8084,node5:9005=node5:8085"
+    ports:
+      - "8083:8083"
+    volumes:
+      - node3-data:/data
+    networks:
+      - kv-net
+    depends_on:
+      - node1
+
+  node4:
+    build: .
+    container_name: kv-node4
+    command:
+      - "-id=node4"
+      - "-http-addr=:8084"
+      - "-raft-addr=node4:9004"
+      - "-data-dir=/data"
+      - "-join=node1:8081"
+      - "-peers=node1:9001=node1:8081,node2:9002=node2:8082,node3:9003=node3:8083,node4:9004=node4:8084,node5:9005=node5:8085"
+    ports:
+      - "8084:8084"
+    volumes:
+      - node4-data:/data
+    networks:
+      - kv-net
+    depends_on:
+      - node1
+
+  node5:
+    build: .
+    container_name: kv-node5
+    command:
+      - "-id=node5"
+      - "-http-addr=:8085"
+      - "-raft-addr=node5:9005"
+      - "-data-dir=/data"
+      - "-join=node1:8081"
+      - "-peers=node1:9001=node1:8081,node2:9002=node2:8082,node3:9003=node3:8083,node4:9004=node4:8084,node5:9005=node5:8085"
+    ports:
+      - "8085:8085"
+    volumes:
+      - node5-data:/data
+    networks:
+      - kv-net
+    depends_on:
+      - node1
+
+networks:
+  kv-net:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
