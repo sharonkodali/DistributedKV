@@ -6,14 +6,9 @@ FROM golang:1.22-alpine AS build
 
 WORKDIR /src
 
-# Copy dependency manifests first and download deps before copying the
-# rest of the source. Docker caches layers -- as long as go.mod/go.sum
-# don't change, this layer is reused on rebuilds instead of re-downloading
-# every dependency each time you change a .go file.
-COPY go.mod go.sum ./
-RUN go mod download
-
 COPY . .
+
+RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -o /kv-server ./cmd/server
 
 # --- Runtime stage ---

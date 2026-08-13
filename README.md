@@ -38,9 +38,27 @@ go run ./cmd/cli -addr localhost:8081 get username
 ```bash
 ./scripts/run-cluster.sh start
 curl -s localhost:8081/status          # note who's leader
-# find and kill that node's process (check /tmp/kv-cluster.pids or `ps aux | grep kv-server`)
+# find and kill that node's process (check /tmp/kv-cluster.pids or `ps aux | grep kv-server-bin`)
 sleep 3
 curl -s localhost:8082/status          # a new leader should now be elected
+```
+
+**5-node cluster with Docker (Day 8-10):**
+```bash
+docker compose up --build
+
+# in another terminal
+curl -s localhost:8081/status
+go run ./cmd/cli -addr localhost:8082 set username John
+go run ./cmd/cli -addr localhost:8081 get username
+
+# test failover by stopping the leader's container directly
+docker stop kv-node1
+sleep 5
+curl -s localhost:8082/status   # a new leader should be elected
+
+docker compose down       # stop everything
+docker compose down -v    # stop + wipe persisted data volumes
 ```
 
 ## API
@@ -61,6 +79,8 @@ internal/store/   -- the actual key-value store (thread-safe in-memory map)
 internal/fsm/     -- bridges Raft and the store (implements Apply/Snapshot/Restore)
 internal/raftnode/-- starts/configures a Raft instance, handles joins and writes
 scripts/          -- run-cluster.sh: start/stop/clean a local 3-node cluster
+Dockerfile        -- multi-stage build producing a small server image
+docker-compose.yml-- 5-node cluster, one container per node
 ```
 
 `store` knows nothing about Raft. `fsm` translates committed Raft log
@@ -88,6 +108,6 @@ go test -race ./...
 
 - [x] Day 1-2: single-node server + CLI
 - [x] Day 3-4: wrap store as a Raft state machine, elect a leader across 3 nodes
-- [ ] Day 5-7: (mostly done above) test leader-crash recovery thoroughly, add more failure-mode tests
-- [ ] Day 8-10: Docker Compose for 5 nodes, polish /status
+- [x] Day 5-7: leader-crash recovery tested and confirmed (kill leader, watch new election, confirm no data loss)
+- [x] Day 8-10: Docker Compose for 5 nodes
 - [ ] Day 11-14: buffer + simulate network partitions

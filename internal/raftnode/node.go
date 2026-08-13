@@ -104,8 +104,16 @@ func Start(cfg Config) (*Node, error) {
 		configuration := raft.Configuration{
 			Servers: []raft.Server{
 				{
+					// Use the ORIGINAL configured address string here, not
+					// transport.LocalAddr(). LocalAddr() reflects the
+					// resolved IP behind cfg.RaftAddr -- fine when
+					// RaftAddr is already an IP (e.g. local testing with
+					// 127.0.0.1), but WRONG when RaftAddr is a hostname
+					// (e.g. "node1:9001" in Docker), since the resolved
+					// IP won't match the hostname-based entries in our
+					// peers map used for leader-forwarding.
 					ID:      raftConfig.LocalID,
-					Address: transport.LocalAddr(),
+					Address: raft.ServerAddress(cfg.RaftAddr),
 				},
 			},
 		}
