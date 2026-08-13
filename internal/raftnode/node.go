@@ -117,11 +117,17 @@ func Start(cfg Config) (*Node, error) {
 				},
 			},
 		}
-		// BootstrapCluster is a no-op (returns an error we can safely
-		// ignore) if this node already has log entries -- e.g. on a
-		// restart. It should only actually take effect the very first
-		// time a cluster is created.
-		r.BootstrapCluster(configuration)
+		// BootstrapCluster's future.Error() returns nil the first time a
+		// fresh cluster is created, but returns raft.ErrCantBootstrap if
+		// this node already has existing log entries (e.g. a restart) --
+		// that specific error is expected and safe to ignore. Any OTHER
+		// error means something genuinely went wrong and the node will
+		// never have a valid configuration, so we surface it loudly
+		// instead of silently continuing with a broken node.
+		bootstrapFuture := r.BootstrapCluster(configuration)
+		if err := bootstrapFuture.Error(); err != nil && err != raft.ErrCantBootstrap {
+			return nil, fmt.Errorf("failed to bootstrap cluster: %w", err)
+		}
 	}
 
 	return &Node{Raft: r, FSM: f, Store: kvStore}, nil

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -82,8 +83,14 @@ func main() {
 
 // parsePeers turns "raftAddr1=httpAddr1,raftAddr2=httpAddr2" into a map.
 // This map is how a follower figures out WHICH HTTP ADDRESS to forward a
-// write to once it knows the leader's Raft address (Raft only speaks in
-// terms of its own transport addresses, not our HTTP API addresses).
+// write to once it knows the leader's Raft address.
+//
+// IMPORTANT: Raft always reports leader addresses in resolved IP:port
+// form (Go's net.TCPAddr can only represent IPs, never hostnames) --
+// even if we configured this node using a hostname like "node1:9001".
+// So the map's KEYS must also be resolved IPs, or a lookup using the
+// address Raft actually reports will never match. We resolve each
+// configured raftAddr's hostname here, once, at startup.
 func parsePeers(s string) (map[string]string, error) {
 	m := make(map[string]string)
 	if s == "" {
@@ -94,7 +101,16 @@ func parsePeers(s string) (map[string]string, error) {
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("bad peer entry %q, expected raftAddr=httpAddr", pair)
 		}
-		m[parts[0]] = parts[1]
+		raftAddr, httpAddr := parts[0], parts[1]
+
+		resolved, err := net.ResolveTCPAddr("tcp", raftAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve peer raft addr %q: %w", raftAddr, err)
+		}
+
+		// Key by the resolved IP:port -- this is what raft.Leader() will
+		// actually report at runtime.
+		m[resolved.String()] = httpAddr
 	}
 	return m, nil
 }
