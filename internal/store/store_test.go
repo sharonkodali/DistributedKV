@@ -49,6 +49,36 @@ func TestOverwrite(t *testing.T) {
 	}
 }
 
+func TestSnapshotAndRestore(t *testing.T) {
+	s := New()
+	s.Set("a", "1")
+	s.Set("b", "2")
+
+	snap := s.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("expected snapshot of 2 keys, got %d", len(snap))
+	}
+
+	// Mutating the original store after taking the snapshot should NOT
+	// affect the snapshot -- it must be an independent copy.
+	s.Set("c", "3")
+	if len(snap) != 2 {
+		t.Fatalf("snapshot should not change after original store mutates, got %d keys", len(snap))
+	}
+
+	// Restoring into a fresh store should reproduce the snapshotted state.
+	fresh := New()
+	fresh.Restore(snap)
+
+	val, err := fresh.Get("a")
+	if err != nil || val != "1" {
+		t.Fatalf("expected restored key 'a' to be '1', got %q, err %v", val, err)
+	}
+	if fresh.Len() != 2 {
+		t.Fatalf("expected restored store to have 2 keys, got %d", fresh.Len())
+	}
+}
+
 // TestConcurrentAccess simulates many goroutines reading and writing at the
 // same time. Run with `go test -race` -- if the mutex were missing or wrong,
 // this test would crash or the race detector would flag it.

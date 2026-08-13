@@ -71,3 +71,28 @@ func (s *Store) Len() int {
 
 	return len(s.data)
 }
+
+// Snapshot returns a copy of all current data. Used by the Raft layer to
+// persist the store's state to disk for fast recovery. Returns a copy
+// (not the live map) so the snapshot can't be mutated by concurrent writes
+// while it's being written out.
+func (s *Store) Snapshot() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	copyData := make(map[string]string, len(s.data))
+	for k, v := range s.data {
+		copyData[k] = v
+	}
+	return copyData
+}
+
+// Restore replaces the store's entire contents with the given data. Used
+// by the Raft layer when a node needs to catch up from a snapshot instead
+// of replaying every historical log entry.
+func (s *Store) Restore(data map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.data = data
+}
