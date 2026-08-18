@@ -103,16 +103,36 @@ func parsePeers(s string) (map[string]string, error) {
 		}
 		raftAddr, httpAddr := parts[0], parts[1]
 
-		resolved, err := net.ResolveTCPAddr("tcp", raftAddr)
+		resolved, err := resolveWithRetry(raftAddr)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve peer raft addr %q: %w", raftAddr, err)
+			return nil, err
 		}
 
 		// Key by the resolved IP:port -- this is what raft.Leader() will
 		// actually report at runtime.
-		m[resolved.String()] = httpAddr
+		m[resolved] = httpAddr
 	}
 	return m, nil
+}
+
+// resolveWithRetry resolves a hostname:port, retrying for a while before
+// giving up. This matters specifically in Docker Compose: all 5 node
+// containers typically start at roughly the same moment, so node1 may try
+// to resolve "node2" via Docker's embedded DNS before node2's container
+// has finished registering itself on the network. Retrying for a few
+// seconds gives every container time to come up, without needing to
+// carefully sequence startup order by hand.
+func resolveWithRetry(addr string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 15; attempt++ {
+		resolved, err := net.ResolveTCPAddr("tcp", addr)
+		if err == nil {
+			return resolved.String(), nil
+		}
+		lastErr = err
+		time.Sleep(1 * time.Second)
+	}
+	return "", fmt.Errorf("failed to resolve %q after retries: %w", addr, lastErr)
 }
 
 // joinCluster asks an existing node (reached via its HTTP API) to add us
