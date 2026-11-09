@@ -29,6 +29,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -36,22 +37,38 @@ import (
 )
 
 func main() {
-	id := flag.String("id", "", "unique node ID, e.g. node1 (required)")
-	httpAddr := flag.String("http-addr", ":8080", "address for the client-facing HTTP API")
-	raftAddr := flag.String("raft-addr", ":9000", "address for Raft's internal node-to-node traffic")
-	dataDir := flag.String("data-dir", "/tmp/kv-data", "directory for this node's Raft log/snapshots")
-	bootstrap := flag.Bool("bootstrap", false, "true ONLY for the very first node of a brand-new cluster")
-	join := flag.String("join", "", "HTTP address of an existing cluster member to join through, e.g. 127.0.0.1:8081")
-	peers := flag.String("peers", "", "comma-separated raftAddr=httpAddr map, used to forward writes to the leader")
-	flag.Parse()
+	s, httpAddr, err := setup(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := http.ListenAndServe(httpAddr, s.routes()); err != nil {
+		log.Fatalf("server failed: %v", err)
+	}
+}
+
+// setup parses flags, starts the Raft node and (if asked) joins a cluster.
+// It's separate from main so tests can check flag handling without
+// actually binding the HTTP port forever.
+func setup(args []string) (*server, string, error) {
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	id := fs.String("id", "", "unique node ID, e.g. node1 (required)")
+	httpAddr := fs.String("http-addr", ":8080", "address for the client-facing HTTP API")
+	raftAddr := fs.String("raft-addr", ":9000", "address for Raft's internal node-to-node traffic")
+	dataDir := fs.String("data-dir", "/tmp/kv-data", "directory for this node's Raft log/snapshots")
+	bootstrap := fs.Bool("bootstrap", false, "true ONLY for the very first node of a brand-new cluster")
+	join := fs.String("join", "", "HTTP address of an existing cluster member to join through, e.g. 127.0.0.1:8081")
+	peers := fs.String("peers", "", "comma-separated raftAddr=httpAddr map, used to forward writes to the leader")
+	if err := fs.Parse(args); err != nil {
+		return nil, "", err
+	}
 
 	if *id == "" {
-		log.Fatal("-id is required")
+		return nil, "", fmt.Errorf("-id is required")
 	}
 
 	peerMap, err := parsePeers(*peers)
 	if err != nil {
-		log.Fatalf("invalid -peers: %v", err)
+		return nil, "", fmt.Errorf("invalid -peers: %w", err)
 	}
 
 	node, err := raftnode.Start(raftnode.Config{
@@ -61,25 +78,36 @@ func main() {
 		Bootstrap: *bootstrap,
 	})
 	if err != nil {
-		log.Fatalf("failed to start raft node: %v", err)
+		return nil, "", fmt.Errorf("failed to start raft node: %w", err)
 	}
 
 	if *join != "" {
 		go joinCluster(*join, *id, *raftAddr)
 	}
 
-	s := &server{node: node, peers: peerMap}
+	log.Printf("node %s: http on %s, raft on %s", *id, *httpAddr, *raftAddr)
+	return &server{node: node, peers: peerMap}, *httpAddr, nil
+}
 
+// routes registers the HTTP endpoints. Kept separate from main so tests can
+// serve the exact same routing table with httptest.
+func (s *server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", s.handleKV)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/join", s.handleJoin)
-
-	log.Printf("node %s: http on %s, raft on %s", *id, *httpAddr, *raftAddr)
-	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
-		log.Fatalf("server failed: %v", err)
-	}
+	return mux
 }
+
+// Retry settings for DNS resolution and joining. Package variables (not
+// constants) so tests can shrink them instead of waiting 15+ seconds for a
+// failure case.
+var (
+	resolveAttempts = 15
+	resolveDelay    = 1 * time.Second
+	joinAttempts    = 10
+	joinDelay       = 2 * time.Second
+)
 
 // parsePeers turns "raftAddr1=httpAddr1,raftAddr2=httpAddr2" into a map.
 // This map is how a follower figures out WHICH HTTP ADDRESS to forward a
@@ -124,13 +152,13 @@ func parsePeers(s string) (map[string]string, error) {
 // carefully sequence startup order by hand.
 func resolveWithRetry(addr string) (string, error) {
 	var lastErr error
-	for attempt := 0; attempt < 15; attempt++ {
+	for attempt := 0; attempt < resolveAttempts; attempt++ {
 		resolved, err := net.ResolveTCPAddr("tcp", addr)
 		if err == nil {
 			return resolved.String(), nil
 		}
 		lastErr = err
-		time.Sleep(1 * time.Second)
+		time.Sleep(resolveDelay)
 	}
 	return "", fmt.Errorf("failed to resolve %q after retries: %w", addr, lastErr)
 }
@@ -138,25 +166,30 @@ func resolveWithRetry(addr string) (string, error) {
 // joinCluster asks an existing node (reached via its HTTP API) to add us
 // as a new Raft voter. It retries for a while because the target node may
 // not have finished electing a leader yet when we first try.
-func joinCluster(joinHTTPAddr, nodeID, raftAddr string) {
+//
+// It returns true once the join succeeds, false if it gave up.
+func joinCluster(joinHTTPAddr, nodeID, raftAddr string) bool {
 	body, _ := json.Marshal(map[string]string{"node_id": nodeID, "raft_addr": raftAddr})
 
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < joinAttempts; attempt++ {
 		resp, err := http.Post("http://"+joinHTTPAddr+"/join", "application/json", strings.NewReader(string(body)))
 		if err == nil {
-			defer resp.Body.Close()
+			respBody, _ := io.ReadAll(resp.Body)
+			// Close now, not via defer: a defer inside this loop would keep
+			// every failed attempt's connection open until the function returns.
+			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				log.Printf("successfully joined cluster via %s", joinHTTPAddr)
-				return
+				return true
 			}
-			respBody, _ := io.ReadAll(resp.Body)
 			log.Printf("join attempt %d failed: %s", attempt+1, string(respBody))
 		} else {
 			log.Printf("join attempt %d failed: %v", attempt+1, err)
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(joinDelay)
 	}
 	log.Printf("giving up joining cluster after repeated failures")
+	return false
 }
 
 type server struct {

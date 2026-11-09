@@ -90,9 +90,19 @@ func (s *Store) Snapshot() map[string]string {
 // Restore replaces the store's entire contents with the given data. Used
 // by the Raft layer when a node needs to catch up from a snapshot instead
 // of replaying every historical log entry.
+//
+// The input is copied rather than stored directly: keeping the caller's map
+// would let the caller mutate the store behind the mutex's back. A nil input
+// (e.g. a snapshot that decoded from JSON "null") becomes an empty store
+// instead of a nil map, which would panic on the next Set.
 func (s *Store) Restore(data map[string]string) {
+	copyData := make(map[string]string, len(data))
+	for k, v := range data {
+		copyData[k] = v
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.data = data
+	s.data = copyData
 }

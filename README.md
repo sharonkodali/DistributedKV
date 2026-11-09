@@ -15,8 +15,8 @@ data loss and zero manual intervention.
 ## What it demonstrates
 
 - **Leader election** via the Raft consensus algorithm (using
-  `hashicorp/raft`, a production-grade implementation used by etcd and
-  Consul)
+  `hashicorp/raft`, the production-grade implementation behind Consul,
+  Nomad and Vault)
 - **Log replication** with majority-commit semantics — a write only
   succeeds once it's durably stored on more than half the cluster
 - **Automatic failover** — killing the leader process triggers a new
@@ -48,10 +48,13 @@ go run ./cmd/cli -addr localhost:8082 get username   # data survived
 ```
 cmd/server/        -- cluster-aware HTTP + Raft node (entry point)
 cmd/cli/            -- CLI client for talking to any node
+cmd/loadtest/       -- concurrent load generator + "no acknowledged write lost" verifier
 internal/store/     -- thread-safe in-memory key-value store
 internal/fsm/        -- bridges Raft and the store (Apply/Snapshot/Restore)
 internal/raftnode/   -- configures and runs the Raft instance, handles joins/writes
-scripts/run-cluster.sh -- local 3-node cluster without Docker, for quick iteration
+scripts/run-cluster.sh -- local cluster without Docker (NODES=3 by default)
+scripts/benchmark.sh   -- throughput/latency benchmark against a fresh local cluster
+scripts/failover-test.sh -- kills the leader mid-load, times re-election, verifies no data loss
 Dockerfile           -- multi-stage build producing a minimal server image
 docker-compose.yml    -- 5-node cluster, one container per node
 ```
@@ -97,8 +100,86 @@ least one of them has every committed write.
 ## Tests
 
 ```bash
-go test -race ./...
+go test -race ./...                         # ~108 tests, about 80s
+go test -race -cover ./...                  # per-package coverage
 ```
+
+Every test runs under Go's race detector. Coverage is 89% of statements
+overall (store 100%, fsm 100%, cli 98.5%, server 93%, loadtest 82%,
+raftnode 80%).
+
+What's covered:
+
+- **store**: CRUD, snapshot/restore independence, and concurrent use of
+  every method at once under `-race`.
+- **fsm**: applying set/delete/malformed/unknown log entries, determinism
+  (two replicas replaying the same log end up identical), snapshot
+  persist/restore, and the snapshot-write failure path.
+- **raftnode**: real multi-node Raft clusters on localhost, covering:
+  - leader election and log replication
+  - followers rejecting writes and membership changes
+  - **killing the leader while 10 clients are writing and checking that every
+    acknowledged write survives on every remaining node**
+  - writes refused without a majority (quorum)
+  - a 5-node cluster surviving 2 failures
+  - a crashed follower catching up after restart
+  - recovery from a snapshot
+- **server**: the HTTP API end to end (status codes, JSON, raw values),
+  forwarding writes from a follower to the leader, and the error paths: no
+  leader (503), unknown or unreachable leader (502), lost quorum, joining
+  over HTTP, and flag handling.
+- **cli**: every command against a fake server, argument validation, and
+  unreachable-server errors.
+
+### Bugs the tests found
+
+- `store.Restore(nil)` left a nil map behind, so the next write panicked
+  (`assignment to entry in nil map`). A snapshot that decodes from JSON
+  `null` would trigger it. `Restore` also kept the caller's map instead of
+  copying it, so outside code could mutate the store without the lock.
+- A failed `raftnode.Start` (e.g. the log file couldn't be opened) left its
+  TCP port bound, so retrying on the same address failed with "address
+  already in use".
+
+Each fix has a regression test that fails on the old code.
+
+## Load testing and failover
+
+`cmd/loadtest` runs N concurrent clients for a fixed time and prints
+throughput plus p50/p95/p99 latency. Afterwards it reads every
+**acknowledged** write back from every live node and exits non-zero if any
+are missing.
+
+```bash
+./scripts/benchmark.sh                     # 5 nodes, 50 clients, 10s per scenario
+NODES=3 CLIENTS=200 ./scripts/benchmark.sh
+./scripts/failover-test.sh                 # 5 nodes, 50 clients, kill -9 the leader at t=5s
+```
+
+Results on an Apple M5 laptop (10 cores), 5 local nodes, 64-byte values:
+
+| Scenario | Clients | Throughput | p50 latency | p99 latency |
+|---|---|---|---|---|
+| Writes, any node (followers forward) | 50 | ~640/s | 77 ms | 116 ms |
+| Writes, leader only | 50 | ~690/s | 70 ms | 150 ms |
+| Writes, any node | 200 | ~2,000/s | 98 ms | 155 ms |
+| Writes, any node | 500 | ~3,200/s | 149 ms | 254 ms |
+| Reads, all nodes (local reads) | 50 | ~82,600/s | 0.5 ms | 2.4 ms |
+
+Every write run verified zero acknowledged writes lost. Write throughput
+grows with concurrency because Raft batches concurrent entries into one
+replication round and one disk sync, so each client waits about the same
+time while the batch gets bigger. Reads are served from each node's local
+copy, so they skip consensus entirely (see the consistency note in
+`cmd/server/main.go`).
+
+**Failover** (`scripts/failover-test.sh`, 5 nodes, 50 writing clients,
+leader killed with `kill -9` mid-write): a new leader was elected in
+1.5–2.3s across runs, and every acknowledged write was present on all 4
+surviving nodes. The load test counts thousands of failed requests in
+this run. That's expected: about a fifth of requests target the dead
+node, and writes sent during the election are refused. A refused write was
+never acknowledged, so it doesn't count as lost.
 
 ## Possible extensions
 

@@ -50,6 +50,12 @@ type Node struct {
 	Raft  *raft.Raft
 	FSM   *fsm.FSM
 	Store *store.Store
+
+	// Kept so Shutdown can release the TCP port and the BoltDB file lock,
+	// which lets a node be restarted in-process (used by tests to
+	// simulate crashes and recoveries).
+	transport *raft.NetworkTransport
+	boltStore *raftboltdb.BoltStore
 }
 
 // Start creates and starts a Raft node according to cfg. It does not join
@@ -80,6 +86,7 @@ func Start(cfg Config) (*Node, error) {
 	// entry since the beginning of time.
 	snapshots, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, os.Stderr)
 	if err != nil {
+		transport.Close() // release the port so a retry can bind it again
 		return nil, fmt.Errorf("failed to create snapshot store: %w", err)
 	}
 
@@ -89,6 +96,7 @@ func Start(cfg Config) (*Node, error) {
 	boltPath := filepath.Join(cfg.DataDir, "raft.db")
 	boltStore, err := raftboltdb.New(raftboltdb.Options{Path: boltPath})
 	if err != nil {
+		transport.Close()
 		return nil, fmt.Errorf("failed to create bolt store: %w", err)
 	}
 
@@ -97,6 +105,8 @@ func Start(cfg Config) (*Node, error) {
 
 	r, err := raft.NewRaft(raftConfig, f, boltStore, boltStore, snapshots, transport)
 	if err != nil {
+		transport.Close()
+		boltStore.Close()
 		return nil, fmt.Errorf("failed to create raft instance: %w", err)
 	}
 
@@ -126,9 +136,29 @@ func Start(cfg Config) (*Node, error) {
 		// instead of silently continuing with a broken node.
 		bootstrapFuture := r.BootstrapCluster(configuration)
 		if err := bootstrapFuture.Error(); err != nil && err != raft.ErrCantBootstrap {
+			n := &Node{Raft: r, transport: transport, boltStore: boltStore}
+			n.Shutdown()
 			return nil, fmt.Errorf("failed to bootstrap cluster: %w", err)
 		}
 	}
 
-	return &Node{Raft: r, FSM: f, Store: kvStore}, nil
+	return &Node{Raft: r, FSM: f, Store: kvStore, transport: transport, boltStore: boltStore}, nil
+}
+
+// Shutdown stops this node's Raft instance and releases its network port
+// and on-disk log. From the rest of the cluster's point of view this looks
+// exactly like the node crashing. A new node can then be started with the
+// same Config (minus Bootstrap) to simulate it coming back.
+func (n *Node) Shutdown() error {
+	var firstErr error
+	if err := n.Raft.Shutdown().Error(); err != nil {
+		firstErr = err
+	}
+	if err := n.transport.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := n.boltStore.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
