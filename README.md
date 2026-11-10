@@ -1,5 +1,7 @@
 # distributed-kv
 
+[![tests](https://github.com/sharonkodali/DistributedKV/actions/workflows/test.yml/badge.svg)](https://github.com/sharonkodali/DistributedKV/actions/workflows/test.yml)
+
 A distributed key-value store implementing the Raft consensus algorithm
 for leader election, log replication, and automatic failover — built to
 understand (and demonstrate) how systems like etcd, CockroachDB, and
